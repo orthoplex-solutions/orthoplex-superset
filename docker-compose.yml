@@ -1,280 +1,194 @@
+
 #
-# Licensed to the Apache Software Foundation (ASF) under one or more
-# contributor license agreements.  See the NOTICE file distributed with
-# this work for additional information regarding copyright ownership.
-# The ASF licenses this file to You under the Apache License, Version 2.0
-# (the "License"); you may not use this file except in compliance with
-# the License.  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Production Docker Compose for Superset on Dokploy
+# With custom configuration file support
 #
 
-# -----------------------------------------------------------------------
-# We don't support docker compose for production environments.
-# If you choose to use this type of deployment make sure to
-# create you own docker environment file (docker/.env) with your own
-# unique random secure passwords and SECRET_KEY.
-#
-# For verbose logging during development:
-# - Set SUPERSET_LOG_LEVEL=debug in docker/.env-local for detailed Superset logs
-# -----------------------------------------------------------------------
-x-superset-user: &superset-user root
-x-superset-volumes: &superset-volumes
-  # /app/pythonpath_docker will be appended to the PYTHONPATH in the final container
-  - ./docker:/app/docker
-  - ./superset:/app/superset
-  - ./superset-core:/app/superset-core
-  - ./superset-frontend:/app/superset-frontend
-  - superset_home:/app/superset_home
-  - ./tests:/app/tests
-  - superset_data:/app/data
-x-common-build: &common-build
-  context: .
-  target: ${SUPERSET_BUILD_TARGET:-dev} # can use `dev` (default) or `lean`
-  cache_from:
-    - apache/superset-cache:3.10-slim-trixie
-  args:
-    DEV_MODE: "true"
-    INCLUDE_CHROMIUM: ${INCLUDE_CHROMIUM:-false}
-    INCLUDE_FIREFOX: ${INCLUDE_FIREFOX:-false}
-    BUILD_TRANSLATIONS: ${BUILD_TRANSLATIONS:-false}
-    LOAD_EXAMPLES_DUCKDB: ${LOAD_EXAMPLES_DUCKDB:-true}
+version: '3.8'
 
 services:
-#  nginx:
-#    env_file:
-#      - path: docker/.env # default
-#        required: true
-#      - path: docker/.env-local # optional override
-#        required: false
-#    image: nginx:latest
-#    container_name: superset_nginx
-#    restart: unless-stopped
-#    ports:
-#      - "80:80"
-#    extra_hosts:
-#      - "host.docker.internal:host-gateway"
-#    volumes:
-#      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-#      - ./docker/nginx/templates:/etc/nginx/templates:ro
-
   redis:
-    image: redis:7
+    image: redis:7-alpine
     container_name: superset_cache
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:6355:6379"
     volumes:
       - redis:/data
+    networks:
+      - superset-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   db:
-    env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
-    image: postgres:16
+    image: postgres:16-alpine
     container_name: superset_db
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:5488:5432"
+    environment:
+      POSTGRES_DB: superset
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
     volumes:
       - db_home:/var/lib/postgresql/data
-      - ./docker/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
-
-  superset:
-    env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
-    build:
-      <<: *common-build
-    container_name: superset_app
-    command: ["/app/docker/docker-bootstrap.sh", "app"]
-    restart: unless-stopped
-    ports:
-      - 8088:8088
-      # When in cypress-mode ->
-      - 8081:8081
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    user: *superset-user
-    depends_on:
-      superset-init:
-        condition: service_completed_successfully
-    volumes: *superset-volumes
-    environment:
-      SUPERSET__SQLALCHEMY_EXAMPLES_URI: "duckdb:////app/data/examples.duckdb"
-
-  superset-websocket:
-    container_name: superset_websocket
-    build: ./superset-websocket
-    ports:
-      - 8080:8080
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      - redis
-    # Mount everything in superset-websocket into container and
-    # then exclude node_modules and dist with bogus volume mount.
-    # This is necessary because host and container need to have
-    # their own, separate versions of these files. .dockerignore
-    # does not seem to work when starting the service through
-    # docker compose.
-    #
-    # For example, node_modules may contain libs with native bindings.
-    # Those bindings need to be compiled for each OS and the container
-    # OS is not necessarily the same as host OS.
-    volumes:
-      - ./superset-websocket:/home/superset-websocket
-      - /home/superset-websocket/node_modules
-      - /home/superset-websocket/dist
-
-      # Mount config file. Create your own docker/superset-websocket/config.json
-      # for custom settings, then point to it here. Do not use this example in production.
-      - ./docker/superset-websocket/config.example.json:/home/superset-websocket/config.json:ro
-    environment:
-      - PORT=8080
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_SSL=false
+    networks:
+      - superset-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superset"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   superset-init:
-    build:
-      <<: *common-build
+    image: apache/superset:latest
     container_name: superset_init
-    command: ["/app/docker/docker-init.sh"]
-    env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
+    command: >
+      /bin/sh -c "
+      superset db upgrade &&
+      superset fab create-admin \
+        --username ${ADMIN_USERNAME:-admin} \
+        --firstname Superset \
+        --lastname Admin \
+        --email ${ADMIN_EMAIL:-admin@superset.com} \
+        --password ${ADMIN_PASSWORD} || echo 'Admin user already exists' &&
+      superset init
+      "
+    environment:
+      DATABASE_HOST: db
+      DATABASE_PORT: 5432
+      DATABASE_DB: superset
+      DATABASE_USER: superset
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      SECRET_KEY: ${SECRET_KEY}
+      SUPERSET_LOAD_EXAMPLES: no
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+    networks:
+      - superset-net
     depends_on:
       db:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
-    user: *superset-user
-    volumes: *superset-volumes
-    environment:
-      SUPERSET__SQLALCHEMY_EXAMPLES_URI: "duckdb:////app/data/examples.duckdb"
+        condition: service_healthy
+    restart: "no"
     healthcheck:
       disable: true
 
-  superset-node:
-    build:
-      context: .
-      target: superset-node
-      args:
-        # This prevents building the frontend bundle since we'll mount local folder
-        # and build it on startup while firing docker-frontend.sh in dev mode, where
-        # it'll mount and watch local files and rebuild as you update them
-        DEV_MODE: "true"
-        BUILD_TRANSLATIONS: ${BUILD_TRANSLATIONS:-false}
+  superset:
+    image: apache/superset:latest
+    container_name: superset_app
+    restart: unless-stopped
     environment:
-      # set this to false if you have perf issues running the npm i; npm run dev in-docker
-      # if you do so, you have to run this manually on the host, which should perform better!
-      BUILD_SUPERSET_FRONTEND_IN_DOCKER: true
-      NPM_RUN_PRUNE: false
-      SCARF_ANALYTICS: "${SCARF_ANALYTICS:-}"
-      # configuring the dev-server to use the host.docker.internal to connect to the backend
-      superset: "http://superset:8088"
+      DATABASE_HOST: db
+      DATABASE_PORT: 5432
+      DATABASE_DB: superset
+      DATABASE_USER: superset
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      SECRET_KEY: ${SECRET_KEY}
+      SUPERSET_LOAD_EXAMPLES: no
+      
+      # Email/SMTP (optional)
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-True}
+      SMTP_SSL: ${SMTP_SSL:-False}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_MAIL_FROM: ${SMTP_MAIL_FROM:-superset@yourdomain.com}
+    
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+    
+    networks:
+      - superset-net
+    
     ports:
-      - "127.0.0.1:9004:9000"  # exposing the dynamic webpack dev server
-    container_name: superset_node
-    command: ["/app/docker/docker-frontend.sh"]
-    env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
-    volumes: *superset-volumes
+      - "8088:8088"
+    
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
 
   superset-worker:
-    build:
-      <<: *common-build
+    image: apache/superset:latest
     container_name: superset_worker
-    command: ["/app/docker/docker-bootstrap.sh", "worker"]
-    env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
-    environment:
-      CELERYD_CONCURRENCY: 2
+    command: celery --app=superset.tasks.celery_app:app worker --pool=prefork -O fair -c ${CELERYD_CONCURRENCY:-4}
     restart: unless-stopped
+    environment:
+      DATABASE_HOST: db
+      DATABASE_PORT: 5432
+      DATABASE_DB: superset
+      DATABASE_USER: superset
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      SECRET_KEY: ${SECRET_KEY}
+      CELERYD_CONCURRENCY: ${CELERYD_CONCURRENCY:-4}
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+    networks:
+      - superset-net
     depends_on:
-      superset-init:
-        condition: service_completed_successfully
-    user: *superset-user
-    volumes: *superset-volumes
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      superset:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "celery -A superset.tasks.celery_app:app inspect ping -d celery@$$HOSTNAME"]
-    # Bump memory limit if processing selenium / thumbnails on superset-worker
-    # mem_limit: 2038m
-    # mem_reservation: 128M
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
 
   superset-worker-beat:
-    build:
-      <<: *common-build
+    image: apache/superset:latest
     container_name: superset_worker_beat
-    command: ["/app/docker/docker-bootstrap.sh", "beat"]
-    env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
+    command: celery --app=superset.tasks.celery_app:app beat --pidfile /tmp/celerybeat.pid --schedule /tmp/celerybeat-schedule
     restart: unless-stopped
+    environment:
+      DATABASE_HOST: db
+      DATABASE_PORT: 5432
+      DATABASE_DB: superset
+      DATABASE_USER: superset
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      SECRET_KEY: ${SECRET_KEY}
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+    networks:
+      - superset-net
     depends_on:
       - superset-worker
-    user: *superset-user
-    volumes: *superset-volumes
     healthcheck:
       disable: true
-
-  superset-tests-worker:
-    build:
-      <<: *common-build
-    container_name: superset_tests_worker
-    command: ["/app/docker/docker-bootstrap.sh", "worker"]
-    env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
-    profiles:
-      - optional
-    environment:
-      DATABASE_HOST: localhost
-      DATABASE_DB: test
-      REDIS_CELERY_DB: 2
-      REDIS_RESULTS_DB: 3
-      REDIS_HOST: localhost
-      CELERYD_CONCURRENCY: 8
-    network_mode: host
-    depends_on:
-      superset-init:
-        condition: service_completed_successfully
-    user: *superset-user
-    volumes: *superset-volumes
-    healthcheck:
-      test: ["CMD-SHELL", "celery inspect ping -A superset.tasks.celery_app:app -d celery@$$HOSTNAME"]
 
 volumes:
   superset_home:
-    external: false
+    driver: local
   db_home:
-    external: false
+    driver: local
   redis:
-    external: false
-  superset_data:
-    external: false
+    driver: local
+
+networks:
+  superset-net:
+    driver: bridge
