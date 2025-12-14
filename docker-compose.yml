@@ -47,29 +47,29 @@ x-common-build: &common-build
     LOAD_EXAMPLES_DUCKDB: ${LOAD_EXAMPLES_DUCKDB:-true}
 
 services:
-  nginx:
-    env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
-    image: nginx:latest
-    container_name: superset_nginx
-    restart: unless-stopped
-    ports:
-      - "80:80"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./docker/nginx/templates:/etc/nginx/templates:ro
+#  nginx:
+#    env_file:
+#      - path: docker/.env # default
+#        required: true
+#      - path: docker/.env-local # optional override
+#        required: false
+#    image: nginx:latest
+#    container_name: superset_nginx
+#    restart: unless-stopped
+#    ports:
+#      - "80:80"
+#    extra_hosts:
+#      - "host.docker.internal:host-gateway"
+#    volumes:
+#      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+#      - ./docker/nginx/templates:/etc/nginx/templates:ro
 
   redis:
     image: redis:7
     container_name: superset_cache
     restart: unless-stopped
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:6355:6379"
     volumes:
       - redis:/data
 
@@ -83,7 +83,7 @@ services:
     container_name: superset_db
     restart: unless-stopped
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5488:5432"
     volumes:
       - db_home:/var/lib/postgresql/data
       - ./docker/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
@@ -187,7 +187,7 @@ services:
       # configuring the dev-server to use the host.docker.internal to connect to the backend
       superset: "http://superset:8088"
     ports:
-      - "127.0.0.1:9000:9000"  # exposing the dynamic webpack dev server
+      - "127.0.0.1:9004:9000"  # exposing the dynamic webpack dev server
     container_name: superset_node
     command: ["/app/docker/docker-frontend.sh"]
     env_file:
